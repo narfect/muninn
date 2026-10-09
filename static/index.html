@@ -1,8 +1,9 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#FBFCFE" />
   <title>Muninn — incident memory</title>
   <meta name="description" content="An incident-response copilot that remembers past outages." />
   <link rel="stylesheet" href="/styles.css?v=20261001-header" />
@@ -16,7 +17,7 @@
   <div id="app" hidden>
     <!-- Status bar: honest about which backends are live (see GET /api/health) -->
     <header class="statusbar" role="banner">
-      <div class="brand"><span class="rune" aria-hidden="true">ᛗ</span><h1 class="wordmark">muninn</h1></div>
+      <a class="brand" href="#/home" aria-label="Muninn home"><span class="rune" aria-hidden="true">ᛗ</span><h1 class="wordmark">muninn</h1></a>
       <!-- open-demo role switcher (populated by app.js renderDemoBar; hidden for real logins) -->
       <div class="demo-switch" id="demo-bar" hidden></div>
       <div class="health" id="health" aria-live="polite">
@@ -30,27 +31,14 @@
         <a href="#/insights" class="viewlink" data-view="insights">Insights</a>
         <a href="#/users" class="viewlink" data-view="users" id="nav-users" hidden>Users</a>
       </nav>
-      <!-- user chip (name + role badge + menu) — populated by app.js after boot -->
       <div class="user-chip" id="user-chip" hidden></div>
     </header>
 
-    <!-- HOME view: product overview and entry point -->
-    <main class="home-view" id="view-home" role="main" hidden>
-      <section class="home-hero">
-        <p class="home-kicker">incident response with institutional memory</p>
-        <h2>When production breaks,<br><span>Muninn remembers.</span></h2>
-        <p class="home-lead">Muninn is an incident-response copilot that recalls how your team solved similar outages, turns that knowledge into a cited triage brief, and learns from every resolution.</p>
-        <div class="home-cta">
-          <a class="btn" href="#/console">Open incident console →</a>
-          <a class="btn btn-ghost" href="#/insights">View learning insights</a>
-        </div>
-      </section>
-      <section class="home-cards" aria-label="How Muninn works">
-        <article class="home-card"><div class="home-number">01</div><h3>Recall what happened before</h3><p>Find similar incidents, root causes, fixes, runbooks, responders, and MTTR from institutional memory.</p></article>
-        <article class="home-card"><div class="home-number">02</div><h3>Respond with evidence</h3><p>Compare a cold generic triage brief with a warm, memory-grounded recommendation and citations.</p></article>
-        <article class="home-card"><div class="home-number">03</div><h3>Remember the resolution</h3><p>Resolve the incident and retain the outcome so the next responder starts with more context.</p></article>
-      </section>
-      <section class="home-loop"><div><strong>The learning loop</strong><br><span>retain → recall → reflect → resolve → retain</span></div><span class="home-loop-stats">Memory-backed triage, measured over time.</span></section>
+    <!-- LANDING view: marketing home (default route #/home). Landing-only motion
+         (security-ops analyzer canvas + scroll reveals) is wired by landing.js; the
+         fills #landing-root (and injects the #socviz canvas into the hero). -->
+    <main class="landing" id="view-landing" role="main" hidden>
+      <div id="landing-root"></div>
     </main>
 
     <!-- CONSOLE view: three-pane war-room -->
@@ -94,8 +82,12 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
-  <!-- auth.js MUST load before app.js (defines window.Auth used by the boot gate) -->
+  <!-- auth.js MUST load before app.js (defines window.Auth used by the boot gate).
+       socviz.js + landing.js define window.MuninnSOC / window.MuninnLanding,
+       which app.js's router drives on the landing route — load them before app.js. -->
   <script src="/auth.js"></script>
+  <script src="/socviz.js"></script>
+  <script src="/landing.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

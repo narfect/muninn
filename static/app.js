@@ -143,21 +143,27 @@ async function bootHealth() {
 
 /* ---- view router (concrete) ---------------------------------------------- */
 function router() {
-  let view = (location.hash.replace(/^#\//, "") || "home");
+  // "#/console" -> "console", "#/home"/"#home"/"#"/"" -> landing. Strip the leading
+  // "#" and an optional "/" so both "#/x" and "#x" forms resolve the same way.
+  let view = (location.hash.replace(/^#\/?/, "") || "home");
   // Users is admin-only — never route a non-admin into it (server 403s anyway).
   if (view === "users" && !(window.Auth && Auth.can("users"))) view = "console";
-  if (!["home", "console", "insights", "users"].includes(view)) view = "home";
-  const isHome = view === "home";
+  const isLanding = view === "home" || view === "landing";
   const isInsights = view === "insights";
   const isUsers = view === "users";
-  const isConsole = view === "console";
-  $("#view-home").hidden = !isHome;
+  const isConsole = !isLanding && !isInsights && !isUsers;
+  // body.on-landing hides the app statusbar and lets the landing's own nav take over.
+  document.body.classList.toggle("on-landing", isLanding);
+  const vLanding = $("#view-landing"); if (vLanding) vLanding.hidden = !isLanding;
   $("#view-console").hidden = !isConsole;
   $("#view-insights").hidden = !isInsights;
   $("#view-users").hidden = !isUsers;
   document.querySelectorAll(".viewlink").forEach((a) => {
     a.setAttribute("aria-current", a.dataset.view === view ? "page" : "false");
   });
+  // Landing-only motion is owned by landing.js; enter/leave start & stop particles +
+  // scroll-reveal so nothing animates (or holds listeners) while the console is up.
+  if (window.MuninnLanding) { isLanding ? MuninnLanding.enter() : MuninnLanding.leave(); }
   if (isInsights) renderInsights();
   if (isUsers) renderUsers();
 }
@@ -697,7 +703,7 @@ async function seedDemo() {
 }
 
 /* ---- canvas charts (no chart lib) ----------------------------------------- */
-const CHART = { ink: "#E7ECF4", muted: "#8DA0BC", line: "#27344A", warm: "#8B7BF6", cold: "#57C3D8" };
+const CHART = { ink: "#141414", muted: "#525252", line: "#DEE5F0", warm: "#F15534", cold: "#3D3D3D" };
 
 // Size the backing store to devicePixelRatio so charts stay crisp on HiDPI displays,
 // then scale the context so drawing code works in CSS pixels. Returns logical W/H.

@@ -1,0 +1,35 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "muninn",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "backend.server"],
+      "port": 8000
+    },
+    {
+      "name": "muninn-8010",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "MUNINN_PORT=8010 exec python -m backend.server"],
+      "port": 8010
+    },
+    {
+      "name": "muninn-8021",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "MUNINN_PORT=8021 MUNINN_DB=$TMPDIR/muninn-p4.db exec python -m backend.server"],
+      "port": 8021
+    },
+    {
+      "name": "muninn-redesign",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "MUNINN_PORT=8042 MUNINN_DB=/tmp/muninn-redesign.db exec python -m backend.server"],
+      "port": 8042
+    },
+    {
+      "name": "muninn-redesign-light",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "MUNINN_PORT=8043 MUNINN_DB=/tmp/muninn-redesign-light.db exec python -m backend.server"],
+      "port": 8043
+    }
+  ]
+}
