@@ -127,6 +127,102 @@ rate-limit backoff, and any single call that can't reach a live backend degrades
 labeled offline fallback rather than failing. If you're sweeping many incidents, give it a
 few seconds between runs for the snappiest, always-live experience.
 
+### Supabase Auth & PostgreSQL (optional)
+
+Muninn can delegate authentication and profile storage to [Supabase](https://supabase.com)
+(email/password auth, JWT bearer tokens, a `profiles` table guarded by Row Level Security).
+It stays fully optional: with no Supabase env vars set, the built-in local auth (SQLite,
+HttpOnly cookies, CSRF double-submit) runs exactly as before.
+
+#### 1. Create the project + schema
+
+1. Create a project at [supabase.com](https://supabase.com) (free tier is fine).
+2. Open **SQL Editor** and run the contents of
+   [`migrations/001_create_profiles.sql`](migrations/001_create_profiles.sql). It creates
+   the `profiles` table (1:1 with `auth.users`, `ON DELETE CASCADE`), enables **Row Level
+   Security** with owner-only policies, and installs a trigger that auto-creates each
+   profile at signup. The migration is idempotent — re-running is safe.
+3. In **Authentication → Providers**, keep **Email** enabled and (for the smoothest
+   first-run experience) disable **Confirm email**, or handle the confirmation flow in
+   your own UI. With confirmation on, signup returns no session until the user confirms.
+
+#### 2. Configure the environment
+
+Copy the Supabase block from [`.env.example`](.env.example) into your `.env`:
+
+```bash
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_ANON_KEY=<anon/public key>
+SUPABASE_SERVICE_ROLE_KEY=<service_role key — server-side ONLY, never ship to a client>
+# Optional: force Supabase mode (auto-detects when URL + anon key are present)
+# MUNINN_USE_SUPABASE=true
+```
+
+All three come from **Supabase → Project Settings → API**. The anon key is designed to be
+public (RLS is the real guard); the **service_role key bypasses RLS** and must never leave
+the server or be committed. `.env` is git-ignored.
+
+Mode is picked automatically: `SUPABASE_URL` + `SUPABASE_ANON_KEY` present → Supabase;
+otherwise local. Setting `MUNINN_USE_SUPABASE=true` forces it (and fails fast at boot if
+the URL/key pair is incomplete). Setting `MUNINN_SERVER_SECRET` (the production signal)
+still disables open-demo mode in both backends.
+
+#### 3. What changes when Supabase mode is on
+
+| | Local mode | Supabase mode |
+|---|---|---|
+| Credentials | scrypt-hashed in SQLite | stored by Supabase Auth (never in this app) |
+| Sessions | opaque token in an HttpOnly cookie | JWT access token + refresh token in the SPA (localStorage) |
+| CSRF | double-submit `X-CSRF-Token` | not needed (stateless Bearer) |
+| Transport | cookie on every request | `Authorization: Bearer <access_token>` header |
+| Refresh | implicit (server session) | `POST /api/auth/refresh` (rotates the refresh token; the SPA auto-refreshes ~1 min before expiry) |
+| Profiles | `users` table | `profiles` table via PostgREST, RLS-enforced |
+| Demo mode | available when enabled | disabled (real accounts only) |
+
+The SPA detects the mode from the auth responses and handles both transparently:
+persisting/restoring the session across reloads, silent refresh, and Bearer headers on
+every API call (including the SSE stream, which takes `?access_token=` since
+`EventSource` cannot set headers).
+
+#### 4. API surface (both modes unless noted)
+
+```
+POST   /api/auth/signup          create account (201; session in body when Supabase)
+POST   /api/auth/login           email/password sign-in (session in body when Supabase)
+GET    /api/auth/me              current user from the session/Bearer token
+POST   /api/auth/logout          revoke the session/refresh token
+POST   /api/auth/refresh         Supabase-only: rotate a refresh token
+GET    /api/auth/profile         Supabase-only: own profile row (RLS)
+PATCH  /api/auth/profile         Supabase-only: update own name/avatar (RLS)
+```
+
+All incident/triage/metrics routes are protected (viewer/responder/admin role gates) in
+both modes; in Supabase mode they accept the Bearer token.
+
+#### 5. Tests
+
+`tests/test_supabase.py` runs fully mocked — no network, always green. A live smoke test
+(`tests/test_supabase_live_smoke.py`) runs against a real project only when you opt in:
+
+```bash
+SUPABASE_URL=... SUPABASE_ANON_KEY=... [SUPABASE_SERVICE_ROLE_KEY=...] \
+MUNINN_SUPABASE_SMOKE=1 python3 -m unittest tests.test_supabase_live_smoke -v
+```
+
+It signs up a throwaway user, checks the auto-created profile, exercises login/refresh/
+logout, verifies RLS isolation, and deletes the user afterwards (needs the service role
+key for that last step).
+
+#### 6. Security notes
+
+- Passwords never touch this application in Supabase mode — Supabase Auth is the
+  credential store; the app only ever handles short-lived JWTs.
+- The service_role key is used only for admin cleanup paths and RLS-bypassing admin reads.
+- RLS is the isolation boundary: even a bug in app code cannot leak one user's profile to
+  another, because every profile query runs under the *caller's* token.
+- Keep `MUNINN_DEMO_OPEN=false` (or set `MUNINN_SERVER_SECRET`) for anything non-local;
+  open-demo is additionally force-disabled in Supabase mode.
+
 For any non-local deployment, also set **`MUNINN_SERVER_SECRET`** to a strong random value
 (it keys the per-session CSRF tokens) and **`MUNINN_COOKIE_SECURE=true`** when serving over
 HTTPS. Session lifetimes and login-lockout thresholds are configurable too — see the
@@ -175,10 +271,14 @@ semantic memory. Details and diagrams: [`docs/ARCHITECTURE.md`](docs/ARCHITECTUR
 
 ```
 backend/    config·models·db·router·server (concrete) + memory·llm·services·api
-static/     index.html · styles.css (design tokens) · app.js · auth.js (SPA + api client)
+            + supabase_client / supabase_auth / supabase_db / auth_unified (optional
+            Supabase Auth + PostgreSQL integration behind one facade)
+static/     index.html · styles.css (design tokens) · app.js · auth.js (SPA + api client;
+            handles both local cookie sessions and Supabase bearer sessions)
+migrations/ 001_create_profiles.sql (Supabase schema: profiles + RLS + auto-profile trigger)
 data/       seed_sample.json (labeled synthetic dataset)
 tests/      stdlib unittest suite (memory · retrieval · agent · services · api ·
-            auth · hardening · correctness)
+            auth · hardening · correctness · supabase [mocked] · supabase live smoke [opt-in])
 docs/       SRS · ARCHITECTURE · PLAN · MVP · HINDSIGHT · TEST_PLAN · USING_MUNINN
 ```
 

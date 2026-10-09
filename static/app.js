@@ -9,14 +9,22 @@ const api = {
   // Mutating requests echo the JS-readable muninn_csrf cookie as X-CSRF-Token
   // (double-submit). The HttpOnly session cookie rides along via fetch's default
   // same-origin credentials — do NOT set credentials:"include".
+  // Supabase mode: the persisted access token goes out as Authorization: Bearer —
+  // the server validates it directly (no cookie, no CSRF in that mode).
+  _authHeaders(h) {
+    if (window.Auth && Auth.accessToken && Auth.accessToken()) {
+      h["Authorization"] = `Bearer ${Auth.accessToken()}`;
+    }
+    return h;
+  },
   _mutHeaders() {
     const h = { "Content-Type": "application/json", "Accept": "application/json" };
     const csrf = window.Auth && Auth.csrf();
     if (csrf) h["X-CSRF-Token"] = csrf;
-    return h;
+    return this._authHeaders(h);
   },
   async get(path) {
-    const r = await fetch(path, { headers: { "Accept": "application/json" } });
+    const r = await fetch(path, { headers: this._authHeaders({ "Accept": "application/json" }) });
     return this._json(r);
   },
   // True only for a 403 caused by a stale/invalid CSRF token — NOT an RBAC denial (which carries
@@ -408,7 +416,11 @@ function _streamTriage(useMem, mount) {
   live.setAttribute("aria-live", "polite");
   const url = `/api/triage/stream?incident_id=${encodeURIComponent(state.selectedId)}` +
     `&use_memory=${useMem ? "true" : "false"}`;
-  api.stream(url, {
+  // EventSource cannot set an Authorization header: in Supabase mode the access token
+  // rides in the query string (the only authenticated SSE consumer; see router auth note).
+  const streamUrl = (window.Auth && Auth.accessToken && Auth.accessToken())
+    ? `${url}&access_token=${encodeURIComponent(Auth.accessToken())}` : url;
+  api.stream(streamUrl, {
     onToken(t) {
       if (settled) return;
       if (!live.isConnected) { clear(mount); mount.appendChild(live); }

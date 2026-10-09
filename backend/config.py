@@ -164,6 +164,25 @@ class Settings:
         default_factory=lambda: int(_env("MUNINN_RL_SIGNUP", "5") or 5)
     )
 
+    # --- Supabase Auth & PostgreSQL ---
+    # Supabase project URL (e.g. https://xyz.supabase.co). When set, Supabase Auth is used
+    # instead of the local email/password auth. The anon key is safe to expose to clients.
+    supabase_url: str = field(default_factory=lambda: _env("SUPABASE_URL", ""))
+    supabase_anon_key: str = field(default_factory=lambda: _env("SUPABASE_ANON_KEY", ""))
+    # Service role key for admin operations (user management, RLS bypass). NEVER expose to clients.
+    supabase_service_role_key: str = field(default_factory=lambda: _env("SUPABASE_SERVICE_ROLE_KEY", ""))
+    # When true, use Supabase Auth; when false (default), use local auth. Auto-detects if URL+keys are set.
+    use_supabase: bool = field(
+        default_factory=lambda: _env_bool("MUNINN_USE_SUPABASE", False)
+    )
+    # Explicit opt-OUT: MUNINN_USE_SUPABASE set to a falsey value (false/0/no/off) forces
+    # local mode even when SUPABASE_URL + anon key are present, suppressing auto-detection.
+    # Lets a developer with a live .env pin local auth without blanking their credentials.
+    supabase_force_local: bool = field(
+        default_factory=lambda: _env("MUNINN_USE_SUPABASE") != ""
+        and not _env_bool("MUNINN_USE_SUPABASE", False)
+    )
+
     # --- local demo conveniences (LOCAL ONLY — must be OFF in any real deployment) ---
     # Autoseed the labeled synthetic dataset on startup when the incidents table is empty,
     # so the app is never a blank slate for a judge/demo. No-op when data already exists.
@@ -199,6 +218,19 @@ class Settings:
             return "local"
         # auto
         return "groq" if self.groq_api_key else "local"
+
+    def resolved_use_supabase(self) -> bool:
+        """Decide whether to use Supabase Auth.
+
+        Precedence: an explicit opt-in (use_supabase) wins; then an explicit opt-out
+        (supabase_force_local) disables auto-detection; otherwise auto-detect from config.
+        """
+        if self.use_supabase:
+            return True
+        if self.supabase_force_local:
+            return False
+        # auto-detect: use Supabase if URL and anon key are configured
+        return bool(self.supabase_url and self.supabase_anon_key)
 
 
 settings = Settings()

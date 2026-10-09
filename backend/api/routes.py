@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import queue
 import threading
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 from ..config import ROOT
 from ..errors import LockedError, NotFoundError
@@ -46,24 +46,44 @@ class Routes:
         })
 
     # --- auth -------------------------------------------------------------
+    # In Supabase mode the session (access + refresh token) is returned in the JSON body
+    # and the SPA persists it; cookies stay empty. In local mode the token rides in
+    # HttpOnly cookies exactly as before. Both shapes share the "user" key.
+
+    def _auth_response(self, user, token: str, csrf: str, status: int = 200,
+                       session: Optional[dict] = None) -> "Response":
+        """Build the auth response for the active backend (body + optional cookies)."""
+        auth = self.ctx.auth
+        payload = auth.build_session_payload(user, token, session=session)
+        resp = Response.json(payload, status=status)
+        cookie = auth.session_cookie(token)
+        if cookie:
+            resp.cookies = [cookie, auth.csrf_cookie(csrf)]
+        return resp
+
     def signup(self, req: "Request") -> "Response":
         self._enforce_rate_limit(req, self.ctx.signup_limiter)
         body = req.json()
-        user, token, csrf = self.ctx.auth.signup(
+        user, token, csrf, session = self.ctx.auth.signup_full(
             email=str(body.get("email", "")), password=str(body.get("password", "")),
             name=str(body.get("name", "")))
-        resp = Response.json({"user": user.as_dict()}, status=201)
-        resp.cookies = [self.ctx.auth.session_cookie(token), self.ctx.auth.csrf_cookie(csrf)]
-        return resp
+        return self._auth_response(user, token, csrf, status=201, session=session)
 
     def login(self, req: "Request") -> "Response":
         self._enforce_rate_limit(req, self.ctx.login_limiter)
         body = req.json()
-        user, token, csrf = self.ctx.auth.login(
+        user, token, csrf, session = self.ctx.auth.login_full(
             email=str(body.get("email", "")), password=str(body.get("password", "")))
-        resp = Response.json({"user": user.as_dict()})
-        resp.cookies = [self.ctx.auth.session_cookie(token), self.ctx.auth.csrf_cookie(csrf)]
-        return resp
+        return self._auth_response(user, token, csrf, session=session)
+
+    def refresh(self, req: "Request") -> "Response":
+        """Rotate a Supabase refresh token into a fresh session (404 in local mode,
+        where sessions are cookie-backed and never need explicit refresh)."""
+        if not self.ctx.auth.using_supabase:
+            return Response.error("not found", status=404, code="not_found")
+        refresh_token = str(req.json().get("refresh_token", ""))
+        payload = self.ctx.auth.refresh_session(refresh_token)
+        return Response.json(payload)
 
     def logout(self, req: "Request") -> "Response":
         self.ctx.auth.logout(req.token)
@@ -73,7 +93,9 @@ class Routes:
 
     def auth_me(self, req: "Request") -> "Response":
         csrf = self.ctx.auth.csrf_token(req.token_hash)
-        resp = Response.json({"user": req.current_user.as_dict(), "csrf": csrf})
+        body: dict = {"user": req.current_user.as_dict(), "csrf": csrf,
+                      "backend": self.ctx.auth.backend}
+        resp = Response.json(body)
         # Re-issue the JS-readable CSRF cookie on every boot-gate check so the SPA always
         # holds a token derived from the CURRENT server secret. Without this, a session
         # minted under one MUNINN_SERVER_SECRET keeps a stale muninn_csrf cookie after the
@@ -81,19 +103,41 @@ class Routes:
         # token stops matching csrf_token(token_hash) — every mutating request then 403s
         # even though the session itself still authenticates. This self-heals on the next
         # GET /api/auth/me (which auth.js runs at boot).
-        resp.cookies = [self.ctx.auth.csrf_cookie(csrf)]
+        cookie = self.ctx.auth.csrf_cookie(csrf)
+        if cookie:
+            resp.cookies = [cookie]
         return resp
+
+    def get_profile(self, req: "Request") -> "Response":
+        """Current user's profile row (Supabase mode; 404 in local mode)."""
+        if not self.ctx.auth.using_supabase:
+            return Response.error("not found", status=404, code="not_found")
+        profile = self.ctx.auth.get_supabase_profile(
+            str(req.current_user.id), req.token or "")
+        return Response.json({"profile": profile.as_dict()})
+
+    def update_profile(self, req: "Request") -> "Response":
+        """Update the current user's own profile (Supabase mode; RLS-enforced)."""
+        if not self.ctx.auth.using_supabase:
+            return Response.error("not found", status=404, code="not_found")
+        data = req.json()
+        profile = self.ctx.auth.update_supabase_profile(
+            str(req.current_user.id), req.token or "", data)
+        return Response.json({"profile": profile.as_dict()})
 
     # --- open demo mode (LOCAL ONLY; public routes, gated by settings.demo_open) ---
     def demo_status(self, req: "Request") -> "Response":
-        """Report whether open demo mode is available (no auth required to read this)."""
-        return Response.json({"enabled": bool(self.ctx.settings.demo_open),
+        """Report whether open demo mode is available (no auth required to read this).
+        Supabase mode never offers open demo — real accounts only."""
+        enabled = bool(self.ctx.settings.demo_open) and not self.ctx.auth.using_supabase
+        return Response.json({"enabled": enabled,
                               "roles": [VIEWER, RESPONDER, ADMIN]})
 
     def demo_login(self, req: "Request") -> "Response":
-        """Mint a real session for a demo account when open demo mode is on; 404 when off.
-        Never accepts or returns a password — the role alone selects the account."""
-        if not self.ctx.settings.demo_open:
+        """Mint a real session for a demo account when open demo mode is on; 404 when off
+        (which includes Supabase mode). Never accepts or returns a password — the role
+        alone selects the account."""
+        if not self.ctx.settings.demo_open or self.ctx.auth.using_supabase:
             return Response.error("not found", status=404, code="not_found")
         role = str(req.json().get("role", "")).strip().lower()
         user, token, csrf = self.ctx.auth.demo_login(role)
@@ -103,12 +147,14 @@ class Routes:
 
     # --- users (admin) ----------------------------------------------------
     def list_users(self, req: "Request") -> "Response":
-        return Response.json({"users": [u.as_dict() for u in self.ctx.repo.list_users()]})
+        # Goes through the auth facade, so Supabase mode lists Supabase profiles (service
+        # role) rather than silently returning the local SQLite users table.
+        return Response.json({"users": [u.as_dict() for u in self.ctx.auth.list_users()]})
 
     def set_user_role(self, req: "Request") -> "Response":
         body = req.json()
         role = str(body.get("role", "")).strip().lower()
-        user = self.ctx.auth.set_role(self._id(req), role)
+        user = self.ctx.auth.set_role(self._user_ref(req), role)
         return Response.json({"user": user.as_dict()})
 
     # --- catalog ----------------------------------------------------------
@@ -269,6 +315,20 @@ class Routes:
         except (KeyError, ValueError):
             raise ValueError("invalid incident id")
 
+    def _user_ref(self, req: "Request") -> object:
+        """A user identifier for the admin routes: the raw path segment (a UUID) in
+        Supabase mode, or an int row id locally. Both are passed to the auth facade, which
+        knows which backend is active."""
+        raw = req.path_params.get("id", "")
+        if self.ctx.auth.using_supabase:
+            if not raw:
+                raise ValueError("invalid user id")
+            return raw
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            raise ValueError("invalid user id")
+
     def _incident_from(self, data: dict[str, Any]) -> Incident:
         """Resolve an incident by id from the store, or build an inline one from fields."""
         inc_id = data.get("incident_id")
@@ -304,10 +364,13 @@ class Routes:
             ("GET", "/api/health", self.health, None),
             ("POST", "/api/auth/signup", self.signup, None),
             ("POST", "/api/auth/login", self.login, None),
+            ("POST", "/api/auth/refresh", self.refresh, None),
             ("GET", "/api/auth/demo-status", self.demo_status, None),
             ("POST", "/api/auth/demo-login", self.demo_login, None),
             ("POST", "/api/auth/logout", self.logout, VIEWER),
             ("GET", "/api/auth/me", self.auth_me, VIEWER),
+            ("GET", "/api/auth/profile", self.get_profile, VIEWER),
+            ("PATCH", "/api/auth/profile", self.update_profile, VIEWER),
             ("GET", "/api/services", self.list_services, VIEWER),
             ("GET", "/api/runbooks", self.list_runbooks, VIEWER),
             ("GET", "/api/incidents", self.list_incidents, VIEWER),

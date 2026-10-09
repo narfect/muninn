@@ -28,6 +28,10 @@ StreamFn = Callable[[], Iterator[str]]
 # HTTP methods that mutate state and therefore require a CSRF check when authenticated.
 _MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
 
+# Auth types
+_AUTH_COOKIE = "cookie"
+_AUTH_BEARER = "bearer"
+
 
 @dataclass
 class Request:
@@ -41,6 +45,7 @@ class Request:
     current_user: Optional[Any] = None
     token: Optional[str] = None
     token_hash: Optional[str] = None
+    auth_type: Optional[str] = None  # "cookie" or "bearer"
     # Remote client IP, set by the server transport (empty in unit tests that build a Request
     # directly). Used only for per-IP auth rate limiting. NOTE: this is the real socket peer,
     # NOT X-Forwarded-For — there is no trusted-proxy allowlist, so honouring a client-supplied
@@ -73,6 +78,13 @@ class Request:
             return None
         morsel = jar.get(name)
         return morsel.value if morsel else None
+
+    def bearer_token(self) -> Optional[str]:
+        """Extract Bearer token from Authorization header."""
+        auth = self.header("authorization")
+        if auth and auth.lower().startswith("bearer "):
+            return auth[7:].strip()
+        return None
 
     @classmethod
     def build(cls, method: str, raw_path: str, headers: dict[str, str], body: bytes) -> "Request":
@@ -163,14 +175,52 @@ class Router:
 
     # --- auth middleware --------------------------------------------------
     def _authenticate(self, req: Request) -> None:
-        """Resolve the session cookie (if any) onto the request. Never raises."""
+        """Resolve the session (Bearer token, query access_token, or cookie) onto the
+        request. Never raises.
+
+        The ``access_token`` query parameter exists ONLY for EventSource, which cannot
+        set an Authorization header (Supabase mode). It is consulted last, after header
+        and cookie auth, so normal requests never rely on it — and the SSE path in the
+        SPA appends it only when a Bearer session is active. Tokens in URLs can leak via
+        logs; the trade-off is accepted for this single streaming endpoint, and the
+        Supabase JWT is short-lived (rotated hourly by refresh)."""
         if self.auth is None:
             return
-        token = req.cookie(self.auth.SESSION_COOKIE)
-        result = self.auth.authenticate(token)
-        if result:
-            req.current_user, req.token_hash = result
-            req.token = token
+
+        # Try Bearer token first (Supabase)
+        bearer = req.bearer_token()
+        if bearer:
+            # For Supabase, authenticate uses the token directly
+            result = self.auth.authenticate(bearer)
+            if result:
+                req.current_user, req.token_hash = result
+                req.token = bearer
+                req.auth_type = _AUTH_BEARER
+                return
+
+        # Fall back to cookie-based auth (local only). Skipped in Supabase mode: there are
+        # no server-side session cookies there, so a lingering local cookie from a prior
+        # local-mode login would otherwise be shipped to Supabase's /auth/v1/user on every
+        # request and rejected as a malformed JWT — a benign but noisy ERROR on each call.
+        token = None if getattr(self.auth, "using_supabase", False) \
+            else req.cookie(self.auth.SESSION_COOKIE)
+        if token:
+            result = self.auth.authenticate(token)
+            if result:
+                req.current_user, req.token_hash = result
+                req.token = token
+                req.auth_type = _AUTH_COOKIE
+                return
+
+        # Last resort: EventSource can't attach headers/cookies beyond same-origin, so
+        # SSE consumers may pass the access token in the query string.
+        qp_token = req.query.get("access_token") or ""
+        if qp_token:
+            result = self.auth.authenticate(qp_token)
+            if result:
+                req.current_user, req.token_hash = result
+                req.token = qp_token
+                req.auth_type = _AUTH_BEARER
 
     @staticmethod
     def _same_origin(origin_or_referer: str, host: str) -> bool:
@@ -178,7 +228,10 @@ class Router:
 
     def _check_csrf(self, req: Request) -> None:
         """Reject cross-site state changes: same-origin Origin/Referer (when the browser
-        sends one) plus a double-submit token that must match this session's CSRF token."""
+        sends one) plus a double-submit token that must match this session's CSRF token.
+        Only applies to cookie-based auth; Bearer token auth is stateless and doesn't need CSRF."""
+        if req.auth_type == _AUTH_BEARER:
+            return  # Bearer tokens don't need CSRF protection
         origin = req.header("origin") or req.header("referer")
         if origin:
             host = req.header("host")

@@ -32,7 +32,7 @@ from .llm.agent import TriageAgent
 from .memory import build_memory_store
 from .ratelimit import RateLimiter
 from .router import Request, Response, Router
-from .services.auth import AuthService
+from .services.auth_unified import UnifiedAuthService as AuthService
 from .services.incidents import IncidentService
 from .services.metrics import MetricsService
 from .services.triage import TriageService
@@ -105,7 +105,10 @@ def bootstrap(ctx: AppContext) -> None:
     empty DB and provision the open-demo accounts. Kept out of :func:`build_context` so tests
     wire the app without these effects and invoke this explicitly when they want them."""
     _maybe_autoseed(ctx)
-    if ctx.settings.demo_open:
+    # Open demo is local-only. In Supabase mode the demo routes self-gate on
+    # ``using_supabase`` (demo-status reports disabled), so skip both the provisioning and
+    # the warning — otherwise the log claims the login gate is bypassed when it is not.
+    if ctx.settings.demo_open and not ctx.auth.using_supabase:
         log.warning(
             "OPEN DEMO MODE is ON (MUNINN_DEMO_OPEN): the login gate is bypassed and anyone "
             "who can reach this server may mint an ADMIN session via POST /api/auth/demo-login. "
