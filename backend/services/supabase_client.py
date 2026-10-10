@@ -79,8 +79,14 @@ class SupabaseClient:
         if not url.startswith(("http://", "https://")):
             raise SupabaseError("SUPABASE_URL must start with http:// or https://",
                                 status=0, code="config_error")
+        parsed = urllib.parse.urlsplit(url)
+        if not parsed.netloc:
+            raise SupabaseError("SUPABASE_URL must include a hostname",
+                                status=0, code="config_error")
+        # Accept a pasted REST endpoint defensively, but always build Auth and REST
+        # requests from the Supabase project root.
         self.settings = settings
-        self._url = url.rstrip("/")
+        self._url = f"{parsed.scheme}://{parsed.netloc}"
         self._anon_key = (settings.supabase_anon_key or "").strip()
         self._service_key = (settings.supabase_service_role_key or "").strip()
 

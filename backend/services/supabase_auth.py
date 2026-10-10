@@ -299,10 +299,11 @@ class SupabaseAuthService:
     def _ensure_profile(self, user: SupabaseUser, access_token: str) -> UserProfile:
         """Create the profile row if missing (idempotent; tolerant of the SQL trigger
         having beaten us to it). Also repairs a profile whose email changed upstream."""
+        profile_data = {
+            "id": user.id, "email": user.email, "name": user.name, "role": user.role,
+        }
         try:
-            row = self.client.insert("profiles", {
-                "id": user.id, "email": user.email, "name": user.name, "role": user.role,
-            }, access_token=access_token)
+            row = self.client.insert("profiles", profile_data, access_token=access_token)
         except SupabaseError as exc:
             # Auto-creation must NEVER block a successful signup/login: a duplicate key (the
             # SQL trigger or a racing request already created the row), an RLS/schema
@@ -316,7 +317,24 @@ class SupabaseAuthService:
         if isinstance(row, dict):
             profile = UserProfile.from_row(row)
         else:
-            profile = self._read_profile(user.id, access_token)
+            try:
+                profile = self._read_profile(user.id, access_token)
+            except NotFoundError:
+                # ``single=True`` maps an empty PostgREST result to PGRST116. Treat that
+                # as a missing row here so signup/login can repair an existing Auth user.
+                profile = None
+            if profile is None and self.settings.supabase_service_role_key:
+                # A user-token insert can be blocked when an older project has stale
+                # grants/policies. Repair only from this server-side fallback; normal
+                # profile reads and updates remain RLS-enforced with the user token.
+                try:
+                    row = self.client.upsert("profiles", profile_data, service_role=True)
+                    if isinstance(row, list) and row:
+                        row = row[0]
+                    if isinstance(row, dict):
+                        profile = UserProfile.from_row(row)
+                except SupabaseError as exc:
+                    log.warning("service-role profile repair failed for %s: %s", user.id, exc)
             if profile is None:
                 # Row neither created nor visible: log loudly but don't fail the session.
                 log.warning("profile row missing for user %s after signup", user.id)
