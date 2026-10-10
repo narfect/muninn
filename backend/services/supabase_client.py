@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -60,6 +61,16 @@ def _build_url(base: str, path: str, query: Optional[dict[str, str]]) -> str:
 
 class SupabaseClient:
     """Minimal, dependency-free Supabase client for Auth + Database operations."""
+
+    # Transient-failure retry (mirrors the resilient Groq client). Supabase sits behind
+    # Cloudflare; a momentary TLS handshake blip, DNS hiccup, connection reset, or edge
+    # 5xx is intermittent and recovers on a retry a fraction of a second later. Without
+    # this, such a blip surfaced to the user as a hard "auth service unreachable" login
+    # failure (observed: an [SSL: CERTIFICATE_VERIFY_FAILED] hostname mismatch from one
+    # Cloudflare PoP that succeeded immediately on the next attempt).
+    _MAX_ATTEMPTS = 3
+    _BACKOFF = (0.5, 1.5, 3.0)
+    _RETRY_STATUS = (502, 503, 504)
 
     def __init__(self, settings: Settings) -> None:
         url = (settings.supabase_url or "").strip()
@@ -119,38 +130,57 @@ class SupabaseClient:
         if extra_headers:
             headers.update(extra_headers)
         data = json.dumps(body).encode("utf-8") if body is not None else None
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
-        try:
-            with urllib.request.urlopen(req, timeout=self.settings.request_timeout) as resp:
-                payload = resp.read().decode("utf-8")
-                if not payload:
-                    return None
-                return json.loads(payload)
-        except urllib.error.HTTPError as exc:
-            raw = exc.read().decode("utf-8", errors="replace")
+        for attempt in range(self._MAX_ATTEMPTS):
+            last = attempt == self._MAX_ATTEMPTS - 1
+            req = urllib.request.Request(url, data=data, headers=headers, method=method)
             try:
-                err = json.loads(raw)
-                msg = err.get("msg") or err.get("message") or err.get("error_description") \
-                    or err.get("error") or raw
-                code = str(err.get("code") or err.get("error_code") or "")
-            except json.JSONDecodeError:
-                msg, code = raw, ""
-            # A 401/403 on the auth endpoints is a routine outcome — an expired, cleared,
-            # or malformed token — that every caller already maps and handles. Logging it
-            # at ERROR floods production logs (e.g. the /auth/v1/user check after logout),
-            # so demote those to INFO; everything else stays ERROR.
-            benign = path.startswith("/auth/") and exc.code in (401, 403)
-            log.log(logging.INFO if benign else logging.ERROR,
-                    "Supabase %s %s -> %s: %s", method, path, exc.code, msg)
-            raise SupabaseError(str(msg), status=exc.code, code=code) from exc
-        except urllib.error.URLError as exc:
-            log.error("Supabase %s %s -> network error: %s", method, path, exc)
-            raise SupabaseError(f"network error reaching Supabase: {exc.reason}",
-                                status=0, code="network_error") from exc
-        except (TimeoutError, OSError) as exc:
-            log.error("Supabase %s %s -> transport failure: %s", method, path, exc)
-            raise SupabaseError("network error reaching Supabase", status=0,
-                                code="network_error") from exc
+                with urllib.request.urlopen(req, timeout=self.settings.request_timeout) as resp:
+                    payload = resp.read().decode("utf-8")
+                    if not payload:
+                        return None
+                    return json.loads(payload)
+            except urllib.error.HTTPError as exc:
+                # Transient gateway errors from the CDN/Supabase edge recover on retry;
+                # a definite 4xx (bad credentials, already-registered, RLS denial) does not,
+                # so it falls straight through to the uniform SupabaseError mapping below.
+                if exc.code in self._RETRY_STATUS and not last:
+                    log.warning("Supabase %s %s -> %s (transient) — retry %d/%d in %.1fs",
+                                method, path, exc.code, attempt + 1, self._MAX_ATTEMPTS,
+                                self._BACKOFF[attempt])
+                    time.sleep(self._BACKOFF[attempt])
+                    continue
+                raw = exc.read().decode("utf-8", errors="replace")
+                try:
+                    err = json.loads(raw)
+                    msg = err.get("msg") or err.get("message") or err.get("error_description") \
+                        or err.get("error") or raw
+                    code = str(err.get("code") or err.get("error_code") or "")
+                except json.JSONDecodeError:
+                    msg, code = raw, ""
+                # A 401/403 on the auth endpoints is a routine outcome — an expired, cleared,
+                # or malformed token — that every caller already maps and handles. Logging it
+                # at ERROR floods production logs (e.g. the /auth/v1/user check after logout),
+                # so demote those to INFO; everything else stays ERROR.
+                benign = path.startswith("/auth/") and exc.code in (401, 403)
+                log.log(logging.INFO if benign else logging.ERROR,
+                        "Supabase %s %s -> %s: %s", method, path, exc.code, msg)
+                raise SupabaseError(str(msg), status=exc.code, code=code) from exc
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                # TLS handshake blips, DNS hiccups and connection resets to the Supabase edge
+                # are transient and almost always clear on an immediate retry. Only the final
+                # attempt maps to the uniform network_error (-> "auth service unreachable").
+                if not last:
+                    log.warning("Supabase %s %s -> transport error (%s) — retry %d/%d in %.1fs",
+                                method, path, exc, attempt + 1, self._MAX_ATTEMPTS,
+                                self._BACKOFF[attempt])
+                    time.sleep(self._BACKOFF[attempt])
+                    continue
+                reason = getattr(exc, "reason", exc)
+                log.error("Supabase %s %s -> network error: %s", method, path, exc)
+                raise SupabaseError(f"network error reaching Supabase: {reason}",
+                                    status=0, code="network_error") from exc
+        # Unreachable: the loop either returns, continues, or raises on every path.
+        raise SupabaseError("network error reaching Supabase", status=0, code="network_error")
 
     # ======================================================================
     # Auth API (/auth/v1)

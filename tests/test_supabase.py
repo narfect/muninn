@@ -30,6 +30,20 @@ from backend.router import Request
 from backend.services.supabase_auth import SupabaseAuthService
 from backend.services.supabase_client import SupabaseClient, SupabaseError, create_client
 
+# The transport retries transient failures with real back-off sleeps. Neutralize the
+# sleep for the whole module so retry-exercising tests stay fast and deterministic
+# (the retry *logic* is still exercised — only the wall-clock wait is removed).
+_sleep_patch = mock.patch("backend.services.supabase_client.time.sleep", lambda *_: None)
+
+
+def setUpModule():
+    _sleep_patch.start()
+
+
+def tearDownModule():
+    _sleep_patch.stop()
+
+
 # --------------------------------------------------------------------------- #
 # Settings helpers — every test runs in Supabase mode with throwaway config.
 # --------------------------------------------------------------------------- #
@@ -182,6 +196,24 @@ def _patch_transport(transport):
     return mock.patch("urllib.request.urlopen", transport)
 
 
+class _SeqTransport:
+    """urlopen replacement that plays a SEQUENCE of outcomes, one per call, counting
+    calls. Exceptions are raised; dicts are returned as a JSON body. The final outcome
+    repeats, so a single-element list models an always-failing transport."""
+
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.calls = 0
+
+    def __call__(self, req, timeout=None):
+        self.calls += 1
+        out = self.outcomes[min(self.calls - 1, len(self.outcomes) - 1)]
+        if isinstance(out, Exception):
+            raise out
+        payload = json.dumps(out).encode("utf-8") if out is not None else b""
+        return _fake_response(payload)
+
+
 # --------------------------------------------------------------------------- #
 # Client-level: transport correctness (right method/path/headers/identity)
 # --------------------------------------------------------------------------- #
@@ -290,6 +322,43 @@ class TestSupabaseClientTransport(unittest.TestCase):
             with self.assertRaises(SupabaseError) as cm:
                 self.client.login("a@x.com", "pw-good-strong-1")
         self.assertEqual(cm.exception.code, "network_error")
+
+    # --- transient-failure retry (resilience against Cloudflare/edge blips) ---------
+    def test_transient_transport_error_recovers_on_retry(self):
+        """A one-off TLS/connection blip (the observed failure) is retried, not surfaced."""
+        seq = _SeqTransport([urllib.error.URLError("tls handshake blip"), {"ok": True}])
+        with _patch_transport(seq):
+            out = self.client._request("POST", "/auth/v1/token", body={"x": 1})
+        self.assertEqual(out, {"ok": True})
+        self.assertEqual(seq.calls, 2)  # failed once, succeeded on retry
+
+    def test_transport_errors_exhaust_then_map_to_network_error(self):
+        """A persistent outage still maps to the uniform network_error after N attempts."""
+        seq = _SeqTransport([urllib.error.URLError("dns failure")])  # always fails
+        with _patch_transport(seq):
+            with self.assertRaises(SupabaseError) as cm:
+                self.client._request("GET", "/auth/v1/user")
+        self.assertEqual(cm.exception.code, "network_error")
+        self.assertEqual(seq.calls, SupabaseClient._MAX_ATTEMPTS)
+
+    def test_gateway_5xx_is_retried(self):
+        """A transient 502/503/504 from the edge is retried before giving up."""
+        seq = _SeqTransport([_http_error(503, {"message": "bad gateway"}), {"ok": True}])
+        with _patch_transport(seq):
+            out = self.client._request("GET", "/rest/v1/profiles")
+        self.assertEqual(out, {"ok": True})
+        self.assertEqual(seq.calls, 2)
+
+    def test_definite_4xx_is_not_retried(self):
+        """A deterministic auth failure (bad credentials) must NOT be retried."""
+        seq = _SeqTransport([_http_error(400, {"message": "Invalid login credentials",
+                                               "code": "invalid_credentials"})])
+        with _patch_transport(seq):
+            with self.assertRaises(SupabaseError) as cm:
+                self.client._request("POST", "/auth/v1/token", body={"x": 1})
+        self.assertEqual(cm.exception.status, 400)
+        self.assertEqual(seq.calls, 1)  # one shot, no wasteful retry
+
 
     def test_select_single_uses_postgrest_object_header(self):
         """``single`` selects one object via the PostgREST Accept header (not a query
