@@ -89,6 +89,9 @@ class UnifiedAuthService:
         self._settings = settings
         self._local: Optional[LocalAuthService] = None
         self._supabase: Optional[SupabaseAuthService] = None
+        # Demo sessions use SQLite even when real accounts use Supabase. This keeps the
+        # public demo independent from external auth without changing real-user auth.
+        self._demo = LocalAuthService(repo, settings)
         self._use_supabase = bool(settings.resolved_use_supabase())
 
         if self._use_supabase:
@@ -113,6 +116,7 @@ class UnifiedAuthService:
         self._settings = value
         if self._local is not None:
             self._local.settings = value
+        self._demo.settings = value
         if self._supabase is not None:
             self._supabase.settings = value
 
@@ -166,7 +170,10 @@ class UnifiedAuthService:
 
     def logout(self, token: Optional[str]) -> None:
         if self._use_supabase:
-            self._supabase.logout(token)
+            if self._demo.authenticate(token):
+                self._demo.logout(token)
+            else:
+                self._supabase.logout(token)
         else:
             self._local.logout(token)
 
@@ -179,6 +186,9 @@ class UnifiedAuthService:
         if not token:
             return None
         if self._use_supabase:
+            demo_user = self._demo.authenticate(token)
+            if demo_user:
+                return demo_user
             sb_user = self._supabase.validate_token(token)
             if sb_user is None:
                 return None
@@ -189,6 +199,9 @@ class UnifiedAuthService:
         """CSRF token for a session. Supabase mode: Bearer auth is CSRF-immune, and
         /api/auth/me must not 500 when handed a bearer token — return ""."""
         if self._use_supabase:
+            if token_hash and len(token_hash) == 64 and all(
+                    c in "0123456789abcdef" for c in token_hash):
+                return self._demo.csrf_token(token_hash)
             return ""
         return self._local.csrf_token(token_hash or "")
 
@@ -265,20 +278,24 @@ class UnifiedAuthService:
             return [_user_from_supabase(p) for p in self._supabase.admin_list_profiles()]
         return self._local.repo.list_users()
 
-    # --- demo mode (local only) ---------------------------------------------------
+    # --- demo mode ---------------------------------------------------------------
 
     def ensure_demo_accounts(self) -> int:
-        if self._use_supabase:
-            return 0
-        return self._local.ensure_demo_accounts()
+        return self._demo.ensure_demo_accounts()
 
     def demo_login(self, role: str) -> tuple[User, str, str]:
-        """Mint a real session for a demo role. Local-only by design; in Supabase mode
-        the route self-gates on settings.demo_open (which is force-disabled by a real
-        MUNINN_SERVER_SECRET, the production signal), so this is a backstop."""
-        if self._use_supabase:
-            raise NotImplementedError("demo login requires local auth")
-        return self._local.demo_login(role)
+        """Mint a local SQLite session for a demo role in either auth backend."""
+        return self._demo.demo_login(role)
+
+    def authenticate_demo(self, token: Optional[str]) -> Optional[tuple[User, str]]:
+        """Authenticate only the local demo cookie without probing Supabase."""
+        return self._demo.authenticate(token)
+
+    def demo_session_cookie(self, token: str) -> str:
+        return self._demo.session_cookie(token)
+
+    def demo_csrf_cookie(self, csrf: str) -> str:
+        return self._demo.csrf_cookie(csrf)
 
     # --- cookie helpers (local sessions only) -----------------------------------
 

@@ -755,12 +755,19 @@ class TestSupabaseRouter(unittest.TestCase):
         self.assertTrue(patches, "no PATCH reached PostgREST")
         self.assertEqual(json.loads(patches[0]["body"]), {"name": "Renamed"})
 
-    def test_demo_mode_disabled_in_supabase(self):
+    def test_demo_mode_available_alongside_supabase(self):
+        server.bootstrap(self.app.ctx)
         resp, status = self.app.dispatch("GET", "/api/auth/demo-status")
         self.assertEqual(resp.status, 200)
-        self.assertFalse(status["enabled"])
-        resp, _ = self.app.dispatch("POST", "/api/auth/demo-login", {"role": "admin"})
-        self.assertEqual(resp.status, 404)
+        self.assertTrue(status["enabled"])
+        resp, body = self.app.dispatch("POST", "/api/auth/demo-login", {"role": "admin"})
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(body["user"]["role"], "admin")
+        self.assertTrue(resp.cookies)
+        cookie = "; ".join(c.split(";", 1)[0] for c in resp.cookies)
+        resp, me = self.app.dispatch("GET", "/api/auth/me", headers={"Cookie": cookie})
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(me["user"]["email"], "admin@muninn.local")
 
     def test_health_is_public(self):
         resp, _ = self.app.dispatch("GET", "/api/health")

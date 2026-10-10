@@ -173,18 +173,17 @@ class TestDemoLogin(unittest.TestCase):
         self.assertEqual(resp.status, 404)
 
 
-class TestProductionForcesDemoClosed(unittest.TestCase):
-    """A real MUNINN_SERVER_SECRET (the production signal) force-disables open demo mode,
-    regardless of the MUNINN_DEMO_OPEN flag value."""
+class TestProductionDemoOptIn(unittest.TestCase):
+    """A deployment can explicitly opt into demo mode even when it has a server secret."""
 
-    def test_server_secret_env_forces_demo_open_false(self):
+    def test_explicit_demo_flag_overrides_server_secret(self):
         from backend.config import Settings
         prev_secret = os.environ.get("MUNINN_SERVER_SECRET")
         prev_flag = os.environ.get("MUNINN_DEMO_OPEN")
         os.environ["MUNINN_SERVER_SECRET"] = "a-real-production-secret"
         os.environ["MUNINN_DEMO_OPEN"] = "true"
         try:
-            self.assertFalse(Settings().demo_open)
+            self.assertTrue(Settings().demo_open)
         finally:
             for k, v in (("MUNINN_SERVER_SECRET", prev_secret),
                          ("MUNINN_DEMO_OPEN", prev_flag)):

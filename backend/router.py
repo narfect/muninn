@@ -198,14 +198,13 @@ class Router:
                 req.auth_type = _AUTH_BEARER
                 return
 
-        # Fall back to cookie-based auth (local only). Skipped in Supabase mode: there are
-        # no server-side session cookies there, so a lingering local cookie from a prior
-        # local-mode login would otherwise be shipped to Supabase's /auth/v1/user on every
-        # request and rejected as a malformed JWT — a benign but noisy ERROR on each call.
-        token = None if getattr(self.auth, "using_supabase", False) \
-            else req.cookie(self.auth.SESSION_COOKIE)
+        # Demo sessions always use the local cookie, including when real accounts use
+        # Supabase bearer auth. The demo-only method prevents stale cookies reaching Auth.
+        token = req.cookie(self.auth.SESSION_COOKIE)
         if token:
-            result = self.auth.authenticate(token)
+            result = (self.auth.authenticate_demo(token)
+                      if getattr(self.auth, "using_supabase", False)
+                      else self.auth.authenticate(token))
             if result:
                 req.current_user, req.token_hash = result
                 req.token = token

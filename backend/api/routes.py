@@ -125,24 +125,22 @@ class Routes:
             str(req.current_user.id), req.token or "", data)
         return Response.json({"profile": profile.as_dict()})
 
-    # --- open demo mode (LOCAL ONLY; public routes, gated by settings.demo_open) ---
+    # --- open demo mode (explicitly enabled; public routes) ----------------------
     def demo_status(self, req: "Request") -> "Response":
-        """Report whether open demo mode is available (no auth required to read this).
-        Supabase mode never offers open demo — real accounts only."""
-        enabled = bool(self.ctx.settings.demo_open) and not self.ctx.auth.using_supabase
+        """Report whether explicitly enabled demo mode is available."""
+        enabled = bool(self.ctx.settings.demo_open)
         return Response.json({"enabled": enabled,
                               "roles": [VIEWER, RESPONDER, ADMIN]})
 
     def demo_login(self, req: "Request") -> "Response":
-        """Mint a real session for a demo account when open demo mode is on; 404 when off
-        (which includes Supabase mode). Never accepts or returns a password — the role
-        alone selects the account."""
-        if not self.ctx.settings.demo_open or self.ctx.auth.using_supabase:
+        """Mint a local demo session regardless of the real-account backend."""
+        if not self.ctx.settings.demo_open:
             return Response.error("not found", status=404, code="not_found")
         role = str(req.json().get("role", "")).strip().lower()
         user, token, csrf = self.ctx.auth.demo_login(role)
         resp = Response.json({"user": user.as_dict()})
-        resp.cookies = [self.ctx.auth.session_cookie(token), self.ctx.auth.csrf_cookie(csrf)]
+        resp.cookies = [self.ctx.auth.demo_session_cookie(token),
+                self.ctx.auth.demo_csrf_cookie(csrf)]
         return resp
 
     # --- users (admin) ----------------------------------------------------

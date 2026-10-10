@@ -68,10 +68,11 @@ recalled memory, and can run triage/compare; **responder** can also create and r
 incidents; **admin** can seed/reset data and manage user roles. The client only hides
 controls it can't use — the server still enforces every check.
 
-Demo mode is **local-only and self-disabling**: set `MUNINN_SERVER_SECRET` (the production
-signal) and it switches off automatically — the sign-in gate returns and **the first
-account created becomes the admin**. The full running guide, per-role capability table, and
-a judge walkthrough are in [`docs/USING_MUNINN.md`](docs/USING_MUNINN.md).
+Demo mode is an explicit public-demo opt-in. It works alongside Supabase: real accounts
+continue using Supabase Auth while demo accounts use isolated local sessions. Set
+`MUNINN_DEMO_OPEN=false` for deployments that require real authentication. The full running
+guide, per-role capability table, and a judge walkthrough are in
+[`docs/USING_MUNINN.md`](docs/USING_MUNINN.md).
 
 ### Stop & restart
 
@@ -164,8 +165,8 @@ the server or be committed. `.env` is git-ignored.
 
 Mode is picked automatically: `SUPABASE_URL` + `SUPABASE_ANON_KEY` present → Supabase;
 otherwise local. Setting `MUNINN_USE_SUPABASE=true` forces it (and fails fast at boot if
-the URL/key pair is incomplete). Setting `MUNINN_SERVER_SECRET` (the production signal)
-still disables open-demo mode in both backends.
+the URL/key pair is incomplete). Demo mode is controlled independently by
+`MUNINN_DEMO_OPEN` and can run alongside either backend.
 
 #### 3. What changes when Supabase mode is on
 

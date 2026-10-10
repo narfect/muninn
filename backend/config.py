@@ -189,14 +189,15 @@ class Settings:
     demo_autoseed: bool = field(
         default_factory=lambda: _env_bool("MUNINN_DEMO_AUTOSEED", True)
     )
-    # OPEN DEMO MODE: skip the login gate and expose one-click role switching over
-    # pre-provisioned demo accounts. This means NO AUTHENTICATION, so it is force-disabled
-    # whenever a real MUNINN_SERVER_SECRET is configured (the production signal) — presence
-    # of that raw env var wins over the flag. `server_secret` itself is never empty (it
-    # falls back to a random per-process value), so we must consult the raw environment.
+    # OPEN DEMO MODE: explicit opt-in for one-click demo sessions. A real server secret
+    # remains useful for signing demo CSRF tokens, so it does not override an explicit
+    # MUNINN_DEMO_OPEN=true. Deployments should leave this false unless public demo access
+    # is intentional.
     demo_open: bool = field(
-        default_factory=lambda: _env_bool("MUNINN_DEMO_OPEN", True)
-        and not bool(os.environ.get("MUNINN_SERVER_SECRET", "").strip())
+        default_factory=lambda: _env_bool(
+            "MUNINN_DEMO_OPEN",
+            not bool(os.environ.get("MUNINN_SERVER_SECRET", "").strip()),
+        )
     )
 
     def resolved_memory_backend(self) -> str:

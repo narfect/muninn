@@ -105,16 +105,14 @@ def bootstrap(ctx: AppContext) -> None:
     empty DB and provision the open-demo accounts. Kept out of :func:`build_context` so tests
     wire the app without these effects and invoke this explicitly when they want them."""
     _maybe_autoseed(ctx)
-    # Open demo is local-only. In Supabase mode the demo routes self-gate on
-    # ``using_supabase`` (demo-status reports disabled), so skip both the provisioning and
-    # the warning — otherwise the log claims the login gate is bypassed when it is not.
-    if ctx.settings.demo_open and not ctx.auth.using_supabase:
+    # Demo sessions use the local SQLite identity store even when real accounts use
+    # Supabase, so provision them whenever the explicit demo flag is enabled.
+    if ctx.settings.demo_open:
         log.warning(
             "OPEN DEMO MODE is ON (MUNINN_DEMO_OPEN): the login gate is bypassed and anyone "
             "who can reach this server may mint an ADMIN session via POST /api/auth/demo-login. "
-            "This is for the LOCAL, offline demo ONLY. Any non-local deployment MUST set a real "
-            "MUNINN_SERVER_SECRET (which force-disables open demo) and MUNINN_COOKIE_SECURE=true "
-            "behind HTTPS."
+            "This is intentionally public. Keep MUNINN_DEMO_OPEN=false for deployments that "
+            "must require real authentication, and use MUNINN_COOKIE_SECURE=true behind HTTPS."
         )
         ctx.auth.ensure_demo_accounts()
 
