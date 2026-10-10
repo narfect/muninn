@@ -1061,7 +1061,33 @@ function wire() {
   if (_wired) return; _wired = true;
   const sb = document.getElementById("btn-seed"); if (sb) sb.addEventListener("click", seedDemo);
   const nb = $("#btn-new"); if (nb) nb.addEventListener("click", newIncident);
-  window.addEventListener("hashchange", router);
+  window.addEventListener("hashchange", handleRouteChange);
+}
+
+function isLandingRoute() {
+  const view = (location.hash.replace(/^#\/?/, "") || "home");
+  return view === "home" || view === "landing";
+}
+
+function showPublicLanding() {
+  const authRoot = $("#auth-root");
+  if (authRoot) { authRoot.hidden = true; authRoot.setAttribute("aria-hidden", "true"); }
+  const app = $("#app");
+  if (app) app.hidden = false;
+  router();
+}
+
+function handleRouteChange() {
+  if (isLandingRoute()) {
+    showPublicLanding();
+    return;
+  }
+  if (window.Auth) {
+    Auth.onAuthenticated(boot);
+    Auth.require();
+  } else {
+    router();
+  }
 }
 
 // Boot callback — runs only AFTER Auth.require() confirms a live session (real OR open-demo),
@@ -1081,7 +1107,13 @@ document.addEventListener("DOMContentLoaded", () => {
   wire();
   if (window.Auth) {
     Auth.onAuthenticated(boot);
-    Auth.require();   // 200 -> boot(user); 401 -> auth screen, no data fetched
+    if (isLandingRoute()) {
+      // The landing page is public. Authentication begins only when the user launches
+      // the console, preserving the existing login gate for all protected app views.
+      showPublicLanding();
+    } else {
+      Auth.require();   // 200 -> boot(user); 401 -> auth screen, no data fetched
+    }
   } else {
     // auth.js failed to load — fail safe to the plain app rather than a blank page
     router(); bootHealth(); renderQueue();
